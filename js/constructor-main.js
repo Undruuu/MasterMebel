@@ -1,267 +1,537 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { TransformControls } from 'three/addons/controls/TransformControls.js';
-import { 
-    createWallPart, createShelfPart, createDividerPart,
-    createCountertopPart, createCountertopSinkPart, createCountertopCornerPart,
-    createDoorPart, createDrawerPart, updatePartSize, updatePartColor
-} from './modules/parts.js';
-import { createGroup, ungroup, isGroup } from './modules/grouping.js';
-import { setupUI } from './modules/ui.js';
 
-let scene, camera, renderer, orbitControls, transformControls;
-let currentMode = 'translate';
-let currentSelectedObject = null;
-let selectedObjects = new Set();
-let uiController;
+// --- ИНИЦИАЛИЗАЦИЯ СЦЕНЫ ---
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x1a1a2e);
+scene.fog = new THREE.FogExp2(0x1a1a2e, 0.006);
 
-let cabinetWidth = 1.0;
-let cabinetHeight = 2.0;
-let cabinetDepth = 0.6;
+const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 1000);
+camera.position.set(4, 3, 5);
+camera.lookAt(0, 1, 0);
 
-// Оптимизация
-let renderRequested = false;
-let isDragging = false;
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setPixelRatio(window.devicePixelRatio);
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+document.body.appendChild(renderer.domElement);
 
-function init() {
-    let container = document.getElementById('canvas-container');
-    if (!container) {
-        container = document.createElement('div');
-        container.id = 'canvas-container';
-        container.style.width = '100%';
-        container.style.height = '100vh';
-        container.style.position = 'absolute';
-        container.style.top = '0';
-        container.style.left = '0';
-        container.style.zIndex = '0';
-        document.body.appendChild(container);
-    }
+const orbitControls = new OrbitControls(camera, renderer.domElement);
+orbitControls.enableDamping = true;
+orbitControls.dampingFactor = 0.05;
+orbitControls.rotateSpeed = 1.0;
+orbitControls.zoomSpeed = 1.2;
+orbitControls.panSpeed = 0.8;
+orbitControls.screenSpacePanning = true;
+orbitControls.maxPolarAngle = Math.PI / 2;
+orbitControls.target.set(0, 1, 0);
+
+const transformControls = new TransformControls(camera, renderer.domElement);
+transformControls.addEventListener('dragging-changed', (event) => {
+    orbitControls.enabled = !event.value;
+});
+scene.add(transformControls);
+
+// --- ОСВЕЩЕНИЕ ---
+const ambientLight = new THREE.AmbientLight(0x404060, 0.5);
+scene.add(ambientLight);
+
+const mainLight = new THREE.DirectionalLight(0xfff5e6, 1.0);
+mainLight.position.set(3, 5, 2);
+mainLight.castShadow = true;
+mainLight.shadow.mapSize.width = 1024;
+mainLight.shadow.mapSize.height = 1024;
+scene.add(mainLight);
+
+const fillLight = new THREE.PointLight(0x4466cc, 0.3);
+fillLight.position.set(-2, 2, -3);
+scene.add(fillLight);
+
+const warmLight = new THREE.PointLight(0xcc8844, 0.25);
+warmLight.position.set(0, -0.5, 0);
+scene.add(warmLight);
+
+const rimLight = new THREE.PointLight(0xffaa66, 0.4);
+rimLight.position.set(0, 2, -3.5);
+scene.add(rimLight);
+
+// --- ПОЛ И СЕТКА ---
+const floorPlane = new THREE.Mesh(
+    new THREE.PlaneGeometry(8, 8),
+    new THREE.ShadowMaterial({ opacity: 0.3, color: 0x000000, transparent: true, side: THREE.DoubleSide })
+);
+floorPlane.rotation.x = -Math.PI / 2;
+floorPlane.position.y = -0.02;
+floorPlane.receiveShadow = true;
+scene.add(floorPlane);
+
+const gridHelper = new THREE.GridHelper(8, 16, 0x88aaff, 0x335588);
+gridHelper.position.y = -0.015;
+gridHelper.material.transparent = true;
+gridHelper.material.opacity = 0.4;
+scene.add(gridHelper);
+
+// --- МАТЕРИАЛЫ ---
+const materials = {
+    woodLight: new THREE.MeshStandardMaterial({ color: 0xDEB887, roughness: 0.5, metalness: 0.05 }),
+    woodMedium: new THREE.MeshStandardMaterial({ color: 0xC4A46C, roughness: 0.55, metalness: 0.03 }),
+    woodDark: new THREE.MeshStandardMaterial({ color: 0x8B5A2B, roughness: 0.6, metalness: 0.02 }),
+    white: new THREE.MeshStandardMaterial({ color: 0xF5F5DC, roughness: 0.4, metalness: 0.02 }),
+    doorMat: new THREE.MeshStandardMaterial({ color: 0xDEB887, roughness: 0.3, metalness: 0.08 })
+};
+
+// --- КЛАСС ДЛЯ СОЗДАНИЯ ОТДЕЛЬНЫХ ЭЛЕМЕНТОВ МЕБЕЛИ ---
+class FurnitureParts {
+    static partCounter = 0;
     
-    scene = new THREE.Scene();
-    scene.background = new THREE.Color(0x111122);
-    
-    camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.5, 15);
-    camera.position.set(3, 2.5, 4);
-    camera.lookAt(0, 1, 0);
-    
-    renderer = new THREE.WebGLRenderer({ 
-        antialias: false, 
-        powerPreference: "high-performance",
-        alpha: false
-    });
-    renderer.setSize(window.innerWidth, window.innerHeight);
-    renderer.setPixelRatio(1); // Фиксируем pixel ratio = 1 для максимальной производительности
-    renderer.shadowMap.enabled = false;
-    container.appendChild(renderer.domElement);
-    
-    // Максимально простое освещение
-    const mainLight = new THREE.DirectionalLight(0xffffff, 0.7);
-    mainLight.position.set(2, 3, 2);
-    scene.add(mainLight);
-    scene.add(new THREE.AmbientLight(0x404060));
-    
-    // Простая сетка
-    const gridHelper = new THREE.GridHelper(8, 12, 0x88aaff, 0x335588);
-    gridHelper.position.y = -0.5;
-    scene.add(gridHelper);
-    
-    // OrbitControls
-    orbitControls = new OrbitControls(camera, renderer.domElement);
-    orbitControls.enableDamping = true;
-    orbitControls.dampingFactor = 0.2;
-    orbitControls.screenSpacePanning = true;
-    orbitControls.enableZoom = true;
-    orbitControls.zoomSpeed = 0.8;
-    orbitControls.rotateSpeed = 0.8;
-    orbitControls.enablePan = true;
-    orbitControls.panSpeed = 0.8;
-    
-    // TransformControls с минимальными обновлениями
-    transformControls = new TransformControls(camera, renderer.domElement);
-    transformControls.size = 0.6;
-    transformControls.space = 'world';
-    
-    transformControls.addEventListener('dragging-changed', (event) => {
-        isDragging = event.value;
-        orbitControls.enabled = !event.value;
+    // Создание стенки (левая, правая, задняя, верх, низ)
+    static createWall(type, width, height, depth, color = 0xDEB887) {
+        let geometry, position;
+        const mat = materials.woodLight.clone();
+        mat.color.setHex(color);
         
-        // Во время перетаскивания используем requestAnimationFrame для плавности
-        if (isDragging) {
-            function dragRender() {
-                if (isDragging) {
-                    renderer.render(scene, camera);
-                    requestAnimationFrame(dragRender);
-                }
-            }
-            dragRender();
-        } else {
-            renderRequested = true;
+        switch(type) {
+            case 'left':
+                geometry = new THREE.BoxGeometry(0.018, height, depth);
+                position = { x: -width/2 + 0.009, y: height/2, z: 0 };
+                break;
+            case 'right':
+                geometry = new THREE.BoxGeometry(0.018, height, depth);
+                position = { x: width/2 - 0.009, y: height/2, z: 0 };
+                break;
+            case 'back':
+                geometry = new THREE.BoxGeometry(width, height, 0.018);
+                position = { x: 0, y: height/2, z: -depth/2 + 0.009 };
+                break;
+            case 'top':
+                geometry = new THREE.BoxGeometry(width, 0.018, depth);
+                position = { x: 0, y: height, z: 0 };
+                break;
+            case 'bottom':
+                geometry = new THREE.BoxGeometry(width, 0.018, depth);
+                position = { x: 0, y: 0, z: 0 };
+                break;
+            case 'base':
+                geometry = new THREE.BoxGeometry(width + 0.04, 0.04, depth + 0.04);
+                position = { x: 0, y: -0.02, z: 0 };
+                break;
+            default: return null;
         }
-    });
-    
-    scene.add(transformControls);
-    
-    // UI
-    uiController = setupUI({
-        onTranslateMode: () => setMode('translate'),
-        onScaleMode: () => setMode('scale'),
-        onApplySize: (width, height, depth) => applySizeToSelected(width, height, depth),
-        onApplyColor: (color) => applyColorToSelected(color),
-        onGroup: () => groupSelectedObjects(),
-        onUngroup: () => ungroupSelectedObject(),
-        onClearSelection: () => clearSelection(),
-        onDelete: () => deleteSelectedObjects()
-    });
-    
-    createDefaultCabinet();
-    setupRaycaster();
-    setupPartsButtons();
-    setupTogglePanel();
-    setupWindowResize();
-    setupKeyboardShortcuts();
-    setupSendToOrderButton();
-    
-    // Запускаем рендер-цикл с низкой частотой
-    startRenderLoop();
-    
-    console.log('3D Конструктор запущен (супер-оптимизированная версия)');
-}
-
-// Рендер-цикл с низкой частотой (15 FPS)
-let lastRenderTime = 0;
-const RENDER_INTERVAL = 1000 / 20; // 20 FPS максимум
-
-function startRenderLoop() {
-    function render() {
-        requestAnimationFrame(render);
         
-        const now = Date.now();
-        if (now - lastRenderTime >= RENDER_INTERVAL || renderRequested) {
-            if (!isDragging) {
-                orbitControls.update();
-                renderer.render(scene, camera);
-                lastRenderTime = now;
-                renderRequested = false;
-            }
-        }
-    }
-    requestAnimationFrame(render);
-}
-
-function requestRender() {
-    renderRequested = true;
-}
-
-function createDefaultCabinet() {
-    const woodMaterial = new THREE.MeshStandardMaterial({ color: 0xDEB887, roughness: 0.7 });
-    const darkMaterial = new THREE.MeshStandardMaterial({ color: 0x8B5A2B, roughness: 0.7 });
-    
-    const objects = [
-        { type: 'left-wall', x: -cabinetWidth/2 + 0.009, y: cabinetHeight/2, z: 0, w: 0.018, h: cabinetHeight, d: cabinetDepth, mat: woodMaterial },
-        { type: 'right-wall', x: cabinetWidth/2 - 0.009, y: cabinetHeight/2, z: 0, w: 0.018, h: cabinetHeight, d: cabinetDepth, mat: woodMaterial },
-        { type: 'back-wall', x: 0, y: cabinetHeight/2, z: -cabinetDepth/2 + 0.009, w: cabinetWidth, h: cabinetHeight, d: 0.018, mat: woodMaterial },
-        { type: 'top', x: 0, y: cabinetHeight, z: 0, w: cabinetWidth, h: 0.018, d: cabinetDepth, mat: woodMaterial },
-        { type: 'bottom', x: 0, y: 0, z: 0, w: cabinetWidth, h: 0.018, d: cabinetDepth, mat: woodMaterial },
-        { type: 'base', x: 0, y: -0.015, z: 0, w: cabinetWidth + 0.05, h: 0.03, d: cabinetDepth + 0.05, mat: darkMaterial },
-        { type: 'shelf', x: 0, y: cabinetHeight/2, z: 0, w: cabinetWidth - 0.1, h: 0.018, d: cabinetDepth - 0.05, mat: woodMaterial },
-        { type: 'door', x: 0, y: cabinetHeight/2, z: cabinetDepth/2 + 0.01, w: cabinetWidth - 0.02, h: cabinetHeight - 0.05, d: 0.02, mat: woodMaterial }
-    ];
-    
-    objects.forEach(obj => {
-        const geometry = new THREE.BoxGeometry(obj.w, obj.h, obj.d);
-        const mesh = new THREE.Mesh(geometry, obj.mat);
-        mesh.position.set(obj.x, obj.y, obj.z);
+        const mesh = new THREE.Mesh(geometry, mat);
+        mesh.position.set(position.x, position.y, position.z);
+        mesh.castShadow = true;
+        mesh.receiveShadow = false;
         mesh.userData = {
-            id: obj.type,
-            type: obj.type,
-            name: getTypeName(obj.type),
-            currentSize: { width: obj.w * 100, height: obj.h * 100, depth: obj.d * 100 }
+            id: `${type}_${Date.now()}_${this.partCounter++}`,
+            type: 'part',
+            partType: type,
+            name: this.getPartName(type),
+            size: { width, height, depth },
+            color: color
         };
-        scene.add(mesh);
-    });
+        return mesh;
+    }
     
-    requestRender();
+    static getPartName(type) {
+        const names = {
+            'left': 'Левая стенка', 'right': 'Правая стенка', 'back': 'Задняя стенка',
+            'top': 'Верхняя крышка', 'bottom': 'Нижнее днище', 'base': 'Основание'
+        };
+        return names[type] || type;
+    }
+    
+    // Полка
+    static createShelf(width, depth, yPosition, color = 0xDEB887) {
+        const mat = materials.woodMedium.clone();
+        mat.color.setHex(color);
+        const mesh = new THREE.Mesh(new THREE.BoxGeometry(width - 0.04, 0.018, depth - 0.03), mat);
+        mesh.position.set(0, yPosition, 0);
+        mesh.castShadow = true;
+        mesh.userData = {
+            id: `shelf_${Date.now()}_${this.partCounter++}`,
+            type: 'part',
+            partType: 'shelf',
+            name: 'Полка',
+            size: { width: width - 0.04, height: 0.018, depth: depth - 0.03 },
+            color: color
+        };
+        return mesh;
+    }
+    
+    // Дверь
+    static createDoor(width, height, isLeft = true, color = 0xDEB887) {
+        const mat = materials.doorMat.clone();
+        mat.color.setHex(color);
+        const mesh = new THREE.Mesh(new THREE.BoxGeometry(width/2 - 0.01, height - 0.04, 0.022), mat);
+        const xOffset = isLeft ? -(width/4 + 0.005) : (width/4 + 0.005);
+        mesh.position.set(xOffset, height/2, 0.31);
+        mesh.castShadow = true;
+        mesh.userData = {
+            id: `door_${Date.now()}_${this.partCounter++}`,
+            type: 'part',
+            partType: 'door',
+            name: 'Дверь',
+            size: { width: width/2 - 0.01, height: height - 0.04, depth: 0.022 },
+            color: color,
+            isLeft: isLeft
+        };
+        return mesh;
+    }
+    
+    // Ящик
+    static createDrawer(width, depth, yPosition, color = 0xDEB887) {
+        const mat = materials.woodMedium.clone();
+        mat.color.setHex(color);
+        const mesh = new THREE.Mesh(new THREE.BoxGeometry(width - 0.06, 0.08, depth - 0.04), mat);
+        mesh.position.set(0, yPosition, 0.31);
+        mesh.castShadow = true;
+        mesh.userData = {
+            id: `drawer_${Date.now()}_${this.partCounter++}`,
+            type: 'part',
+            partType: 'drawer',
+            name: 'Ящик',
+            size: { width: width - 0.06, height: 0.08, depth: depth - 0.04 },
+            color: color
+        };
+        return mesh;
+    }
+    
+    // Перегородка (вертикальная)
+    static createDivider(height, depth, xPosition, color = 0xDEB887) {
+        const mat = materials.woodMedium.clone();
+        mat.color.setHex(color);
+        const mesh = new THREE.Mesh(new THREE.BoxGeometry(0.018, height, depth - 0.05), mat);
+        mesh.position.set(xPosition, height/2, 0);
+        mesh.castShadow = true;
+        mesh.userData = {
+            id: `divider_${Date.now()}_${this.partCounter++}`,
+            type: 'part',
+            partType: 'divider',
+            name: 'Перегородка',
+            size: { width: 0.018, height: height, depth: depth - 0.05 },
+            color: color
+        };
+        return mesh;
+    }
 }
 
-function getTypeName(type) {
-    const names = {
-        'left-wall': 'Левая стена', 'right-wall': 'Правая стена', 'back-wall': 'Задняя стена',
-        'top': 'Верхняя крышка', 'bottom': 'Нижнее днище', 'base': 'Основание',
-        'shelf': 'Полка', 'door': 'Дверь'
+// --- ГОТОВЫЕ ВАРИАНТЫ ШКАФОВ ---
+
+// Вариант 1: Классический двухдверный шкаф
+function createClassicCabinet(x, z) {
+    const group = new THREE.Group();
+    const width = 1.2;
+    const height = 2.0;
+    const depth = 0.6;
+    
+    // Корпус
+    group.add(FurnitureParts.createWall('left', width, height, depth, 0xDEB887));
+    group.add(FurnitureParts.createWall('right', width, height, depth, 0xDEB887));
+    group.add(FurnitureParts.createWall('back', width, height, depth, 0xDEB887));
+    group.add(FurnitureParts.createWall('top', width, height, depth, 0xDEB887));
+    group.add(FurnitureParts.createWall('bottom', width, height, depth, 0xDEB887));
+    group.add(FurnitureParts.createWall('base', width, height, depth, 0x8B5A2B));
+    
+    // Полки
+    group.add(FurnitureParts.createShelf(width, depth, 0.6, 0xDEB887));
+    group.add(FurnitureParts.createShelf(width, depth, 1.2, 0xDEB887));
+    
+    // Двери
+    group.add(FurnitureParts.createDoor(width, height, true, 0xDEB887));
+    group.add(FurnitureParts.createDoor(width, height, false, 0xDEB887));
+    
+    group.position.set(x, 0, z);
+    group.userData = {
+        type: 'preset',
+        presetName: 'Классический шкаф',
+        isPreset: true
     };
-    return names[type] || type;
+    return group;
 }
 
-let allPartsList = [];
+// Вариант 2: Шкаф-купе с одной дверью и открытой секцией
+function createWardrobeWithOpenSection(x, z) {
+    const group = new THREE.Group();
+    const width = 1.4;
+    const height = 2.1;
+    const depth = 0.55;
+    
+    // Корпус
+    group.add(FurnitureParts.createWall('left', width, height, depth, 0xC4A46C));
+    group.add(FurnitureParts.createWall('right', width, height, depth, 0xC4A46C));
+    group.add(FurnitureParts.createWall('back', width, height, depth, 0xC4A46C));
+    group.add(FurnitureParts.createWall('top', width, height, depth, 0xC4A46C));
+    group.add(FurnitureParts.createWall('bottom', width, height, depth, 0xC4A46C));
+    group.add(FurnitureParts.createWall('base', width, height, depth, 0x8B5A2B));
+    
+    // Перегородка (разделяет закрытую и открытую части)
+    group.add(FurnitureParts.createDivider(height, depth, 0.2, 0xC4A46C));
+    
+    // Полки в открытой секции
+    group.add(FurnitureParts.createShelf(0.5, depth, 0.7, 0xC4A46C));
+    group.add(FurnitureParts.createShelf(0.5, depth, 1.3, 0xC4A46C));
+    
+    // Дверь на правую секцию
+    const rightDoor = new THREE.Mesh(new THREE.BoxGeometry(0.65, height - 0.04, 0.022), materials.doorMat);
+    rightDoor.position.set(0.55, height/2, depth/2 + 0.008);
+    rightDoor.castShadow = true;
+    rightDoor.userData = { type: 'part', partType: 'door', name: 'Дверь' };
+    group.add(rightDoor);
+    
+    group.position.set(x, 0, z);
+    group.userData = {
+        type: 'preset',
+        presetName: 'Шкаф-купе с открытой секцией',
+        isPreset: true
+    };
+    return group;
+}
 
-function updatePartsList() {
-    allPartsList = [];
-    scene.traverse(obj => {
-        if (obj.isMesh && obj !== transformControls && !obj.isHelper && obj.userData && obj.userData.type) {
-            allPartsList.push({
-                id: obj.userData.id,
-                type: obj.userData.type,
-                name: obj.userData.name,
-                size: obj.userData.currentSize
-            });
+// Вариант 3: Угловая секция
+function createCornerSection(x, z) {
+    const group = new THREE.Group();
+    const width = 0.9;
+    const height = 1.8;
+    const depth = 0.9;
+    
+    group.add(FurnitureParts.createWall('left', width, height, depth, 0xD2B48C));
+    group.add(FurnitureParts.createWall('right', width, height, depth, 0xD2B48C));
+    group.add(FurnitureParts.createWall('back', width, height, depth, 0xD2B48C));
+    group.add(FurnitureParts.createWall('top', width, height, depth, 0xD2B48C));
+    group.add(FurnitureParts.createWall('bottom', width, height, depth, 0xD2B48C));
+    
+    // Полки
+    group.add(FurnitureParts.createShelf(width, depth, 0.5, 0xD2B48C));
+    group.add(FurnitureParts.createShelf(width, depth, 1.0, 0xD2B48C));
+    group.add(FurnitureParts.createShelf(width, depth, 1.5, 0xD2B48C));
+    
+    group.position.set(x, 0, z);
+    group.userData = {
+        type: 'preset',
+        presetName: 'Угловая секция',
+        isPreset: true
+    };
+    return group;
+}
+
+// Вариант 4: Тумба с ящиками
+function createDrawerCabinet(x, z) {
+    const group = new THREE.Group();
+    const width = 0.6;
+    const height = 0.8;
+    const depth = 0.45;
+    
+    group.add(FurnitureParts.createWall('left', width, height, depth, 0xDEB887));
+    group.add(FurnitureParts.createWall('right', width, height, depth, 0xDEB887));
+    group.add(FurnitureParts.createWall('back', width, height, depth, 0xDEB887));
+    group.add(FurnitureParts.createWall('top', width, height, depth, 0xDEB887));
+    group.add(FurnitureParts.createWall('bottom', width, height, depth, 0xDEB887));
+    group.add(FurnitureParts.createWall('base', width, height, depth, 0x8B5A2B));
+    
+    // Ящики
+    group.add(FurnitureParts.createDrawer(width, depth, 0.2, 0xDEB887));
+    group.add(FurnitureParts.createDrawer(width, depth, 0.5, 0xDEB887));
+    
+    group.position.set(x, 0, z);
+    group.userData = {
+        type: 'preset',
+        presetName: 'Тумба с ящиками',
+        isPreset: true
+    };
+    return group;
+}
+
+// --- СОЗДАНИЕ НАЧАЛЬНОЙ СЦЕНЫ С ГОТОВЫМИ ВАРИАНТАМИ ---
+
+// Добавляем готовые варианты на сцену
+const classicCabinet = createClassicCabinet(-1.2, -0.5);
+const wardrobe = createWardrobeWithOpenSection(0, -0.8);
+const cornerSection = createCornerSection(1.3, -0.3);
+const drawerCab = createDrawerCabinet(-0.5, 1.2);
+const drawerCab2 = createDrawerCabinet(0.5, 1.2);
+
+scene.add(classicCabinet);
+scene.add(wardrobe);
+scene.add(cornerSection);
+scene.add(drawerCab);
+scene.add(drawerCab2);
+
+// --- ПЕРЕМЕННЫЕ ДЛЯ ДОБАВЛЕНИЯ ЭЛЕМЕНТОВ ---
+let currentSelectedObject = classicCabinet;
+let lastAddedPosition = { x: -1.5, z: 1.5 };
+let currentMode = 'translate';
+
+// Прикрепляем контрол
+transformControls.attach(classicCabinet);
+
+// --- ФУНКЦИИ ДЛЯ ДОБАВЛЕНИЯ ЭЛЕМЕНТОВ ---
+function addPart(partType) {
+    let newPart = null;
+    const defaultWidth = 1.0;
+    const defaultHeight = 1.8;
+    const defaultDepth = 0.55;
+    
+    switch(partType) {
+        case 'left-wall':
+            newPart = FurnitureParts.createWall('left', defaultWidth, defaultHeight, defaultDepth, 0xDEB887);
+            break;
+        case 'right-wall':
+            newPart = FurnitureParts.createWall('right', defaultWidth, defaultHeight, defaultDepth, 0xDEB887);
+            break;
+        case 'back-wall':
+            newPart = FurnitureParts.createWall('back', defaultWidth, defaultHeight, defaultDepth, 0xDEB887);
+            break;
+        case 'top':
+            newPart = FurnitureParts.createWall('top', defaultWidth, defaultHeight, defaultDepth, 0xDEB887);
+            break;
+        case 'bottom':
+            newPart = FurnitureParts.createWall('bottom', defaultWidth, defaultHeight, defaultDepth, 0xDEB887);
+            break;
+        case 'shelf':
+            newPart = FurnitureParts.createShelf(defaultWidth, defaultDepth, 0.9, 0xDEB887);
+            break;
+        case 'door':
+            newPart = FurnitureParts.createDoor(defaultWidth, defaultHeight, true, 0xDEB887);
+            break;
+        case 'drawer':
+            newPart = FurnitureParts.createDrawer(defaultWidth, defaultDepth, 0.3, 0xDEB887);
+            break;
+        case 'divider':
+            newPart = FurnitureParts.createDivider(defaultHeight, defaultDepth, 0, 0xDEB887);
+            break;
+        default: return;
+    }
+    
+    if (newPart) {
+        // Размещаем новый элемент в свободном месте
+        lastAddedPosition.x += 0.8;
+        if (lastAddedPosition.x > 2.5) {
+            lastAddedPosition.x = -1.5;
+            lastAddedPosition.z += 0.8;
+        }
+        newPart.position.x = lastAddedPosition.x;
+        newPart.position.z = lastAddedPosition.z;
+        
+        scene.add(newPart);
+        transformControls.detach();
+        transformControls.attach(newPart);
+        currentSelectedObject = newPart;
+        
+        showNotification(`Добавлен: ${newPart.userData.name}`, 'success');
+    }
+}
+
+function addPreset(presetType) {
+    let newPreset = null;
+    
+    switch(presetType) {
+        case 'classic':
+            newPreset = createClassicCabinet(lastAddedPosition.x, lastAddedPosition.z);
+            break;
+        case 'wardrobe':
+            newPreset = createWardrobeWithOpenSection(lastAddedPosition.x, lastAddedPosition.z);
+            break;
+        case 'corner':
+            newPreset = createCornerSection(lastAddedPosition.x, lastAddedPosition.z);
+            break;
+        case 'drawer-cabinet':
+            newPreset = createDrawerCabinet(lastAddedPosition.x, lastAddedPosition.z);
+            break;
+        default: return;
+    }
+    
+    if (newPreset) {
+        lastAddedPosition.x += 1.0;
+        if (lastAddedPosition.x > 2.5) {
+            lastAddedPosition.x = -1.5;
+            lastAddedPosition.z += 1.0;
+        }
+        
+        scene.add(newPreset);
+        transformControls.detach();
+        transformControls.attach(newPreset);
+        currentSelectedObject = newPreset;
+        
+        showNotification(`Добавлен: ${newPreset.userData.presetName}`, 'success');
+    }
+}
+
+function clearAll() {
+    const objectsToKeep = [gridHelper, floorPlane];
+    
+    scene.children.forEach(child => {
+        if (child.isGroup || (child.isMesh && child.userData && child.userData.type)) {
+            if (!objectsToKeep.includes(child)) {
+                scene.remove(child);
+                if (child.geometry) child.geometry.dispose();
+                if (child.material) child.material.dispose();
+            }
         }
     });
+    
+    showNotification('Все объекты удалены', 'success');
 }
 
-function setupSendToOrderButton() {
-    const sendBtn = document.getElementById('send-to-order');
-    if (sendBtn) {
-        sendBtn.addEventListener('click', () => {
-            updatePartsList();
-            let message = `Здравствуйте! Я создал проект в 3D конструкторе.\n\n`;
-            message += `📦 Количество деталей: ${allPartsList.length}\n\n📋 Список деталей:\n`;
-            allPartsList.forEach(part => {
-                message += `- ${part.name}: ${Math.round(part.size.width)}x${Math.round(part.size.height)}x${Math.round(part.size.depth)} см\n`;
-            });
-            localStorage.setItem('constructorMessage', message);
-            showNotification('Проект сохранен!', 'success');
-            setTimeout(() => { window.location.href = 'SiteA_1.html?openForm=true'; }, 800);
-        });
+function resetCamera() {
+    camera.position.set(4, 3, 5);
+    orbitControls.target.set(0, 1, 0);
+    orbitControls.update();
+    showNotification('Камера сброшена', 'success');
+}
+
+function toggleGrid() {
+    gridHelper.visible = !gridHelper.visible;
+    const btn = document.getElementById('btn-toggle-grid');
+    if (btn) btn.textContent = `📐 Сетка: ${gridHelper.visible ? 'Вкл' : 'Выкл'}`;
+}
+
+function setMode(mode) {
+    currentMode = mode;
+    transformControls.setMode(mode);
+    const btnTranslate = document.getElementById('btn-translate');
+    const btnScale = document.getElementById('btn-scale');
+    if (btnTranslate && btnScale) {
+        if (mode === 'translate') {
+            btnTranslate.classList.add('active');
+            btnScale.classList.remove('active');
+        } else {
+            btnScale.classList.add('active');
+            btnTranslate.classList.remove('active');
+        }
     }
 }
 
 function showNotification(message, type) {
     const notification = document.createElement('div');
     notification.style.cssText = `
-        position: fixed; top: 80px; right: 20px;
+        position: fixed;
+        top: 80px;
+        right: 20px;
         background: ${type === 'success' ? '#27ae60' : '#e74c3c'};
-        color: white; padding: 10px 18px; border-radius: 8px;
-        z-index: 1000; font-weight: 600; animation: slideIn 0.2s ease;
+        color: white;
+        padding: 10px 18px;
+        border-radius: 8px;
+        z-index: 1000;
+        font-weight: 600;
+        animation: slideIn 0.3s ease;
+        font-family: 'Segoe UI', sans-serif;
     `;
-    notification.innerHTML = `<i class="fas ${type === 'success' ? 'fa-check-circle' : 'fa-exclamation-circle'}"></i> ${message}`;
+    notification.innerHTML = `🪑 ${message}`;
     document.body.appendChild(notification);
-    setTimeout(() => notification.remove(), 2000);
+    setTimeout(() => {
+        notification.style.opacity = '0';
+        setTimeout(() => notification.remove(), 300);
+    }, 2000);
 }
 
-function deleteSelectedObjects() {
-    if (selectedObjects.size === 0) return;
-    if (!confirm(`Удалить ${selectedObjects.size} объект(ов)?`)) return;
-    
-    selectedObjects.forEach(obj => {
-        scene.remove(obj);
-        if (obj.parent && obj.parent !== scene) obj.parent.remove(obj);
-        if (obj.geometry) obj.geometry.dispose();
-        if (obj.material) obj.material.dispose();
-    });
-    clearSelection();
-    updatePartsList();
-    requestRender();
+function goToHome() {
+    window.location.href = 'index.html';
 }
 
-function setupKeyboardShortcuts() {
-    window.addEventListener('keydown', (event) => {
-        if (event.key === 'Delete') { event.preventDefault(); deleteSelectedObjects(); }
-        if (event.key === 'Escape') clearSelection();
-        if (event.key === 'v') setMode('translate');
-        if (event.key === 's') setMode('scale');
-    });
-}
-
+// --- ВЫДЕЛЕНИЕ ОБЪЕКТОВ ---
 function setupRaycaster() {
     const raycaster = new THREE.Raycaster();
     const mouse = new THREE.Vector2();
@@ -277,168 +547,77 @@ function setupRaycaster() {
         
         const clickableObjects = [];
         scene.traverse(obj => {
-            if (obj.isMesh && obj !== transformControls && !obj.isHelper && obj.userData.type) {
+            if ((obj.isGroup || obj.isMesh) && obj !== transformControls && 
+                obj !== gridHelper && obj.userData && (obj.userData.type === 'part' || obj.userData.isPreset)) {
                 clickableObjects.push(obj);
             }
         });
         
-        const intersects = raycaster.intersectObjects(clickableObjects);
+        const intersects = raycaster.intersectObjects(clickableObjects, true);
         
         if (intersects.length > 0) {
-            handleSelection(intersects[0].object, event.ctrlKey || event.metaKey);
-        } else if (!event.ctrlKey && !event.metaKey) {
-            clearSelection();
+            let selected = intersects[0].object;
+            while (selected.parent && selected.parent !== scene && !selected.userData?.isPreset && !selected.userData?.type) {
+                selected = selected.parent;
+            }
+            if (selected.userData && (selected.userData.type === 'part' || selected.userData.isPreset)) {
+                transformControls.detach();
+                transformControls.attach(selected);
+                currentSelectedObject = selected;
+                const name = selected.userData.presetName || selected.userData.name;
+                showNotification(`Выделен: ${name}`, 'success');
+            }
         }
-        requestRender();
     });
 }
 
-function handleSelection(object, isMultiSelect) {
-    if (isMultiSelect) {
-        if (selectedObjects.has(object)) {
-            selectedObjects.delete(object);
-        } else {
-            selectedObjects.add(object);
-        }
-        if (selectedObjects.size === 1) {
-            currentSelectedObject = Array.from(selectedObjects)[0];
-            transformControls.attach(currentSelectedObject);
-        } else {
-            currentSelectedObject = null;
-            transformControls.detach();
-        }
-    } else {
-        selectedObjects.clear();
-        selectedObjects.add(object);
-        currentSelectedObject = object;
-        transformControls.attach(object);
-    }
-    if (uiController) uiController.updateUI(currentMode, currentSelectedObject, selectedObjects.size);
-    requestRender();
-}
-
-function clearSelection() {
-    selectedObjects.clear();
-    currentSelectedObject = null;
-    transformControls.detach();
-    if (uiController) uiController.updateUI(currentMode, null, 0);
-    requestRender();
-}
-
-function setMode(mode) {
-    currentMode = mode;
-    transformControls.setMode(mode);
-}
-
-function applySizeToSelected(width, height, depth) {
-    if (currentSelectedObject && currentMode === 'scale' && selectedObjects.size === 1) {
-        updatePartSize(currentSelectedObject, width, height, depth);
-        if (uiController) uiController.updateObjectInfo(currentSelectedObject, 1);
-        updatePartsList();
-        requestRender();
-    }
-}
-
-function applyColorToSelected(color) {
-    if (currentSelectedObject && selectedObjects.size === 1) {
-        updatePartColor(currentSelectedObject, color);
-        if (uiController) uiController.updateObjectInfo(currentSelectedObject, 1);
-        updatePartsList();
-        requestRender();
-    }
-}
-
-function groupSelectedObjects() {
-    if (selectedObjects.size < 2) {
-        showNotification('Выберите 2+ объекта (Ctrl+Клик)', 'error');
-        return;
-    }
-    const objectsToGroup = Array.from(selectedObjects);
-    const group = createGroup(objectsToGroup, scene);
-    if (group) {
-        scene.add(group);
-        clearSelection();
-        currentSelectedObject = group;
-        transformControls.attach(group);
-        if (uiController) uiController.updateUI(currentMode, group, 1);
-        updatePartsList();
-        requestRender();
-    }
-}
-
-function ungroupSelectedObject() {
-    if (!currentSelectedObject || !isGroup(currentSelectedObject)) {
-        showNotification('Выделите группу', 'error');
-        return;
-    }
-    const children = ungroup(currentSelectedObject, scene);
-    if (children) {
-        clearSelection();
-        children.forEach(child => selectedObjects.add(child));
-        if (uiController) uiController.updateUI(currentMode, null, children.length);
-        updatePartsList();
-        requestRender();
-    }
-}
-
-function setupPartsButtons() {
-    document.querySelectorAll('.part-btn').forEach(btn => {
-        btn.addEventListener('click', () => addPart(btn.dataset.part));
-    });
-}
-
-function addPart(type) {
-    const x = (Math.random() - 0.5) * 2;
-    const z = (Math.random() - 0.5) * 2;
-    let mesh = null;
+// --- UI НАСТРОЙКА ---
+function setupUI() {
+    document.getElementById('btn-translate')?.addEventListener('click', () => setMode('translate'));
+    document.getElementById('btn-scale')?.addEventListener('click', () => setMode('scale'));
+    document.getElementById('btn-reset-camera')?.addEventListener('click', resetCamera);
+    document.getElementById('btn-toggle-grid')?.addEventListener('click', toggleGrid);
+    document.getElementById('btn-clear-all')?.addEventListener('click', clearAll);
+    document.getElementById('home-button')?.addEventListener('click', goToHome);
     
-    switch(type) {
-        case 'left-wall': mesh = createWallPart('left-wall', x, z, cabinetWidth, cabinetHeight, cabinetDepth); break;
-        case 'right-wall': mesh = createWallPart('right-wall', x, z, cabinetWidth, cabinetHeight, cabinetDepth); break;
-        case 'back-wall': mesh = createWallPart('back-wall', x, z, cabinetWidth, cabinetHeight, cabinetDepth); break;
-        case 'top': mesh = createWallPart('top', x, z, cabinetWidth, cabinetHeight, cabinetDepth); break;
-        case 'bottom': mesh = createWallPart('bottom', x, z, cabinetWidth, cabinetHeight, cabinetDepth); break;
-        case 'base': mesh = createWallPart('base', x, z, cabinetWidth, cabinetHeight, cabinetDepth); break;
-        case 'shelf': mesh = createShelfPart(x, z, 0.8, 0.5, 1.0); break;
-        case 'divider': mesh = createDividerPart(x, z, 0.018, 1.5, 0.5); break;
-        case 'countertop': mesh = createCountertopPart(x, z, 1.2, 0.6); break;
-        case 'countertop-sink': mesh = createCountertopSinkPart(x, z, 1.2, 0.6); break;
-        case 'countertop-corner': mesh = createCountertopCornerPart(x, z, 1.0, 1.0); break;
-        case 'door': mesh = createDoorPart(x, z, 0.8, 1.8); break;
-        case 'drawer': mesh = createDrawerPart(x, z, 0.8, 0.4, 0.5); break;
-        default: return;
-    }
+    // Элементы мебели
+    document.getElementById('btn-add-left-wall')?.addEventListener('click', () => addPart('left-wall'));
+    document.getElementById('btn-add-right-wall')?.addEventListener('click', () => addPart('right-wall'));
+    document.getElementById('btn-add-back-wall')?.addEventListener('click', () => addPart('back-wall'));
+    document.getElementById('btn-add-top')?.addEventListener('click', () => addPart('top'));
+    document.getElementById('btn-add-bottom')?.addEventListener('click', () => addPart('bottom'));
+    document.getElementById('btn-add-shelf')?.addEventListener('click', () => addPart('shelf'));
+    document.getElementById('btn-add-door')?.addEventListener('click', () => addPart('door'));
+    document.getElementById('btn-add-drawer')?.addEventListener('click', () => addPart('drawer'));
+    document.getElementById('btn-add-divider')?.addEventListener('click', () => addPart('divider'));
     
-    if (mesh) {
-        scene.add(mesh);
-        clearSelection();
-        currentSelectedObject = mesh;
-        transformControls.attach(mesh);
-        if (uiController) uiController.updateUI(currentMode, mesh, 1);
-        updatePartsList();
-        requestRender();
-    }
+    // Готовые варианты
+    document.getElementById('btn-preset-classic')?.addEventListener('click', () => addPreset('classic'));
+    document.getElementById('btn-preset-wardrobe')?.addEventListener('click', () => addPreset('wardrobe'));
+    document.getElementById('btn-preset-corner')?.addEventListener('click', () => addPreset('corner'));
+    document.getElementById('btn-preset-drawer')?.addEventListener('click', () => addPreset('drawer-cabinet'));
 }
 
-function setupTogglePanel() {
-    const toggleBtn = document.getElementById('toggle-parts');
-    const partsPanel = document.getElementById('parts-panel');
-    if (toggleBtn && partsPanel) {
-        toggleBtn.addEventListener('click', () => partsPanel.classList.toggle('collapsed'));
-    }
+// --- АНИМАЦИЯ ---
+function animate() {
+    requestAnimationFrame(animate);
+    orbitControls.update();
+    renderer.render(scene, camera);
 }
 
-function setupWindowResize() {
-    window.addEventListener('resize', () => {
-        camera.aspect = window.innerWidth / window.innerHeight;
-        camera.updateProjectionMatrix();
-        renderer.setSize(window.innerWidth, window.innerHeight);
-        requestRender();
-    });
+// --- ЗАПУСК ---
+function init() {
+    setupUI();
+    setupRaycaster();
+    animate();
+    console.log('✅ 3D Конструктор мебели готов!');
+    console.log('📦 Можно добавлять отдельные элементы или готовые варианты');
 }
 
-const style = document.createElement('style');
-style.textContent = `@keyframes slideIn { from { transform: translateX(100%); opacity: 0; } to { transform: translateX(0); opacity: 1; } }`;
-document.head.appendChild(style);
+window.addEventListener('resize', () => {
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+});
 
-init();
+document.addEventListener('DOMContentLoaded', init);
